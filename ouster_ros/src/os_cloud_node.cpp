@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     auto sensor_frame = tf_prefix + "os_sensor";
     auto imu_frame = tf_prefix + "os_imu";
     auto lidar_frame = tf_prefix + "os_lidar";
+    auto timestamp_mode = nh.param("timestamp_mode", std::string{});
 
     ouster_ros::OSConfigSrv cfg{};
     auto client = nh.serviceClient<ouster_ros::OSConfigSrv>("os_config");
@@ -75,6 +76,8 @@ int main(int argc, char** argv) {
 
     ouster::ScanBatcher batch(W, pf);
 
+    auto timestamp_mode_int = sensor::timestamp_mode_of_string(timestamp_mode);
+
     auto lidar_handler = [&](const PacketMsg& pm) mutable {
         if (batch(pm.buf.data(), ls)) {
             auto h = std::find_if(
@@ -84,8 +87,23 @@ int main(int argc, char** argv) {
             if (h != ls.headers.end()) {
                 for (int i = 0; i < n_returns; i++) {
                     scan_to_cloud(xyz_lut, h->timestamp, ls, cloud, i);
+
+                    // set ROS time if sensor is not yet synchronized via PTP
+                    std::chrono::nanoseconds ts_data = h->timestamp;
+                    std::chrono::seconds h_seconds =
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            h->timestamp);
+                    if (h_seconds.count() < 100000 &&
+                        sensor::TIME_FROM_PTP_1588 == timestamp_mode_int) {
+                        ROS_WARN_THROTTLE(
+                            5,
+                            "PTP_1588 mode active, sensor not synchronized!");
+                        long ns = (ros::Time::now().toSec() * 1e9);
+                        ts_data = std::chrono::nanoseconds(ns);
+                    }
+
                     lidar_pubs[i].publish(ouster_ros::cloud_to_cloud_msg(
-                        cloud, h->timestamp, sensor_frame));
+                        cloud, ts_data, sensor_frame));
                 }
             }
         }
